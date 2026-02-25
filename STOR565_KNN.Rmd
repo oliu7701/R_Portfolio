@@ -1,0 +1,186 @@
+---
+title: "STOR565_KNN"
+output:
+  html_document:
+    df_print: paged
+date: "2023-03-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Upload Images
+```{r}
+library(reticulate)
+use_condaenv("tf")
+library(tensorflow)
+```
+
+SBrainTumorClass combines the original testing and training into a single file.
+```{r}
+library(jpeg)
+library(magick)
+#List of no_tumor files
+path <- "C:/Users/Oscar/Downloads/SBrainTumorClass/no_tumor/"
+files <- list.files(path=path, pattern=".jpg") 
+no.tumor <- list(rep(0,length(files)))
+for(i in 1:length(files)){
+  img = image_read(paste0(path,files[i]))
+  img = image_scale(img,"100x100!")
+  no.tumor[[i]] <- readJPEG(image_write(img))
+}
+
+#glioma_tumor
+path <- "C:/Users/Oscar/Downloads/SBrainTumorClass/glioma_tumor/"
+files <- list.files(path=path, pattern=".jpg") 
+glioma.tumor <- list(rep(0,length(files)))
+for(i in 1:length(files)){
+  img = image_read(paste0(path,files[i]))
+  img = image_scale(img,"100x100!")
+  glioma.tumor[[i]] <- readJPEG(image_write(img))
+}
+
+#meningioma_tumor
+path <- "C:/Users/Oscar/Downloads/SBrainTumorClass/meningioma_tumor/"
+files <- list.files(path=path, pattern=".jpg") 
+meningioma.tumor <- list(rep(0,length(files)))
+for(i in 1:length(files)){
+  img = image_read(paste0(path,files[i]))
+  img = image_scale(img,"100x100!")
+  meningioma.tumor[[i]] <- readJPEG(image_write(img))
+}
+
+#pituitary_tumor
+path <- "C:/Users/Oscar/Downloads/SBrainTumorClass/pituitary_tumor/"
+files <- list.files(path=path, pattern=".jpg") 
+pituitary.tumor <- list(rep(0,length(files)))
+for(i in 1:length(files)){
+  img = image_read(paste0(path,files[i]))
+  img = image_scale(img,"100x100!")
+  pituitary.tumor[[i]] <- readJPEG(image_write(img))
+}
+```
+
+Split and reformat the data 
+```{r}
+set.seed(10)
+tumor = c(no.tumor,glioma.tumor,meningioma.tumor,pituitary.tumor)
+reorder = sample(length(tumor))
+
+pixel = matrix(data = rep(NA, length(tumor)*100*100),
+                nrow = length(tumor),
+                ncol = 100*100)
+for(i in 1:100){
+  for(j in 1:100){
+    for(k in 1:length(tumor)){
+      which.col = 100*(i-1)+j
+      pixel[k,which.col] = tumor[[reorder[k]]][i,j]
+      
+    }
+  }
+}
+
+classes = c(rep("no_tumor",length(no.tumor)),
+            rep("glioma_tumor",length(glioma.tumor)),
+            rep("meningioma_tumor",length(meningioma.tumor)),
+            rep("pituitary_tumor",length(pituitary.tumor)))
+class = rep(NA,length(classes))
+for(i in 1:length(tumor)){
+  class[i] = classes[reorder[i]]
+}
+
+pixel.train = pixel[1:2528,]
+pixel.test = pixel[2529:3160,]
+class.train = class[1:2528]
+class.test = class[2529:3160]
+
+# Space is a sparse resource
+rm(pixel)
+rm(class)
+```
+
+## Dimension Reduction
+KNN is highly susceptible to curse of dimensionality.
+```{r,cache=TRUE}
+pca.brain = prcomp(pixel.train, scale = FALSE)
+var_explained_brain = 
+  data.frame(PC=paste0("PC",1:length(pixel.train)),                             var_explained=(pca.brain$sdev)^2/sum((pca.brain$sdev)^2),                     cum_explained=cumsum((pca.brain$sdev)^2)/sum((pca.brain$sdev)^2))
+```
+
+Choose a new number of features.
+```{r}
+lastPC = min(which(var_explained_brain$cum_explained>.9))
+
+library(tidyverse)
+var_explained_brain[1:9,] %>%
+  ggplot(aes(x=PC,y=cum_explained, group=1))+
+  geom_point(size=4)+
+  geom_line()+
+  labs(title="Scree plot: cum explained")
+```
+
+Visual Representation 
+```{r, warning = FALSE}
+brains = data.frame(class.train)
+PCN = c("class")
+for(i in 1:lastPC){
+  PC = pca.brain$x[,i]
+  brains = cbind(brains,PC)
+  PCN = append(PCN,paste0("PC",i))
+}
+colnames(brains)=PCN
+
+#pca plot
+library(ggplot2)
+ggplot(brains, aes(x=PC1, y=PC2, color=class)) + 
+    geom_point(size=2) 
+```
+
+## KNN Model
+Cross Validation to determine optimal k
+```{r}
+library(class)
+knn.fcv <-function(df,k){
+  class.accuracy = rep(NA,5)
+  set = sample(rep(1:5,length.out=nrow(df)))
+  for(i in 1:5){
+    train = df[ifelse(set==i,F,T),]
+    test = df[ifelse(set==i,T,F),]
+    knn.pred = knn(train[,-1], test[,-1], train[,1], k)
+    class.accuracy[i] = mean(knn.pred == test[,1])
+  }
+  return(mean(class.accuracy))
+}
+
+possible.k = seq(1,101,2)
+accuracy.k = rep(NA,51)
+
+for(i in 1:51){
+  accuracy.k[i] = knn.fcv(brains,possible.k[i])
+}
+which.max(accuracy.k)
+# accuracy.k[1:10]
+```
+KNN on testing set
+```{r}
+pixel.test = sweep(pixel.test,2,pca.brain$center)
+pixel.test = pixel.test %*% pca.brain$rotation[,1:lastPC]
+knn.pred = knn(brains[,-1], pixel.test, brains[,1], which.max(accuracy.k))
+
+# Total accuracy
+mean(knn.pred == class.test)
+# No tumor accuracy
+mean(knn.pred[which(knn.pred=="no_tumor")] == 
+       class.test[which(knn.pred=="no_tumor")])
+# Glioma accuracy
+mean(knn.pred[which(knn.pred=="glioma_tumor")] == 
+       class.test[which(knn.pred=="glioma_tumor")])
+# Meningioma accuracy
+mean(knn.pred[which(knn.pred=="meningioma_tumor")] == 
+       class.test[which(knn.pred=="meningioma_tumor")])
+# Pituitary accuracy
+mean(knn.pred[which(knn.pred=="pituitary_tumor")] == 
+       class.test[which(knn.pred=="pituitary_tumor")])
+```
+
